@@ -1,0 +1,119 @@
+# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+#
+# NVIDIA CORPORATION & AFFILIATES and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION & AFFILIATES is strictly prohibited.
+
+global:
+    exp_name: 'diffusion-nerf'
+
+dataset:
+    multiview_dataset_format: 'standard'
+    num_rays_sampled_per_img: 4096
+    mip: 2
+    bg_color: 'white'
+
+grid:
+    grid_type: 'HashGrid'
+    interpolation_type: 'linear'
+    multiscale_type: 'cat'
+    feature_dim: 2
+    feature_std: 0.01
+    feature_bias: 0.0
+    num_lods: 16
+    codebook_bitwidth: 19
+    tree_type: 'geometric'
+    min_grid_res: 16
+    max_grid_res: 2048
+    prune_density_decay: 0.6
+    blas_level: 7
+
+nef:
+    hidden_dim: 64
+    num_layers: 1
+    pos_embedder: 'none'
+    position_input: False
+    view_embedder: 'spherical'
+    view_multires: 4
+    blob_scale: 5.0
+    blob_width: 0.2
+    bottleneck_dim: 2
+    
+tracer:
+    raymarch_type: 'ray'
+    num_steps: 512
+
+optimizer:
+    optimizer_type: 'rmsprop'  # 'adam'
+    lr: 0.001
+    rgb_loss: 1.0
+    minibatch_size: 1
+    iterations_per_epoch: 100
+    warmup_iterations: 0
+    init_lr: 0.1
+    end_lr: 0.01
+    reg_warmup_iterations: 1000
+    reg_init_lr: 0.01
+    phase_ratios:
+        - 0.1
+        - 0.7
+    albedo_steps: 1000
+    orientation_loss: 0.01
+    opacity_loss: 0.002
+    entropy_loss: 0 #.001
+    total_variation_loss: 0
+    diffusion_loss: 1
+    aug_bg_color: 'noise'
+
+trainer:
+    epochs: 100
+    batch_size: 1
+    model_format: 'full'
+    valid_every: 50
+    save_every: 10
+    prune_every: 16
+    render_tb_every: 10
+
+diffusion:
+    repo_id: 'stabilityai/stable-diffusion-2-1-base'
+    prompt: 'a zoomed out DSLR photo of a baby bunny sitting on top of a stack of pancakes'
+    negative_prompt: '' #blurry, poorly rendered, oversaturated, deformed, low resolution, lowres, cropped, worst quality, artifacts, ugly, bad proportions'
+    guidance_scale: 100
+
+camera:
+    resolutions:
+        - 64
+        - 64
+        - 256
+    light_distance_range:
+        - 2.0 # 0.8
+        - 3.0 # 1.5
+    camera_distance_range:
+        - 2.5 # 1.0
+        - 2.5  # 3.0 # 1.5
+    azimuth_range:
+        - 0
+        - 360
+    polar_range:
+        - 0
+        - 100
+    focal_length_multiplier_range:
+        - 1.0  # 0.7
+        - 2.0  # 1.35
+    camera_offset: 0  # 0.1
+    camera_up_std: 0  # 0.02
+    look_at_std: 0  # 0.1
+    
+renderer:
+    render_batch: 4096
+    num_steps: 512
+    raymarch_type: ray
+    camera_origin:
+        - -3.0
+        - 0.65
+        - -3.0
+    render_res:
+        - 1024
+        - 1024
