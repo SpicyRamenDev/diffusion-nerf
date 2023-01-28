@@ -21,6 +21,13 @@ from kaolin.render.camera import Camera
 from wisp.ops.raygen.raygen import generate_default_grid, generate_centered_pixel_coords, generate_pinhole_rays
 
 
+def generate_camera_rays(camera):
+    ray_grid = generate_centered_pixel_coords(camera.width, camera.height,
+                                              camera.width, camera.height,
+                                              device='cuda')
+    return generate_pinhole_rays(camera, ray_grid)
+
+
 def sample(value_range=(0, 1)):
     return value_range[0] + (value_range[1] - value_range[0]) * torch.rand(1)
 

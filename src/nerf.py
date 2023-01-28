@@ -20,7 +20,7 @@ import kaolin.ops.spc as spc_ops
 
 from wisp.ops.differential.gradients import autodiff_gradient, finitediff_gradient, tetrahedron_gradient
 
-from .ide_embedder import get_ide_embedder
+from .view_embedder import get_ide_embedder
 from .utils import l2_normalize, reflect, finitediff_gradient_with_grad, tetrahedron_gradient_with_grad
 
 
@@ -31,8 +31,8 @@ class DiffuseNeuralField(BaseNeuralField):
                  pos_embedder: str = 'none',
                  view_embedder: str = 'none',
                  pos_multires: int = 10,
-                 view_multires: int = 4,
                  position_input: bool = False,
+                 view_multires: int = 4,
                  # decoder args
                  activation_type: str = 'relu',
                  layer_type: str = 'none',
@@ -44,21 +44,19 @@ class DiffuseNeuralField(BaseNeuralField):
                  blob_scale: float = 5.0,
                  blob_width: float = 0.2,
                  bottleneck_dim: int = 8,
+                 normal_method: str = 'finitediff',
                  **kwargs,
                  ):
         super().__init__()
         self.grid = grid
 
-        # Init Embedders
-        self.position_input = position_input
-        if self.position_input:
-            self.pos_embedder, self.pos_embed_dim = self.init_embedder(pos_embedder, pos_multires)
-        else:
-            self.pos_embedder, self.pos_embed_dim = None, 0
-        self.view_embedder, self.view_embed_dim = self.init_embedder(view_embedder, view_multires)
-        self.bg_view_embedder, self.bg_view_embed_dim = self.init_embedder(view_embedder, 4)
+        self.pos_embedder, self.pos_embed_dim = self.init_embedder(pos_embedder, pos_multires,
+                                                                   include_input=position_input)
+        self.view_embedder, self.view_embed_dim = self.init_embedder(view_embedder, view_multires,
+                                                                     include_input=True)
+        self.bg_view_embedder, self.bg_view_embed_dim = self.init_embedder(view_embedder, 4,
+                                                                           include_input=True)
 
-        # Init Decoder
         self.activation_type = activation_type
         self.layer_type = layer_type
         self.hidden_dim = hidden_dim
@@ -67,8 +65,6 @@ class DiffuseNeuralField(BaseNeuralField):
         self.decoder_spatial, self.decoder_directional, self.decoder_background = \
             self.init_decoders(activation_type, layer_type, num_layers, hidden_dim, bottleneck_dim)
         self.density_activation = torch.nn.Softplus()
-        # self.density_activation = torch.nn.ReLU()
-        # self.density_activation = torch.exp
 
         self.prune_density_decay = prune_density_decay
         self.prune_min_density = prune_min_density
@@ -76,15 +72,17 @@ class DiffuseNeuralField(BaseNeuralField):
         self.blob_scale = blob_scale
         self.blob_width = blob_width
 
+        self.normal_method = normal_method
+
         torch.cuda.empty_cache()
 
-    def init_embedder(self, embedder_type, frequencies=None):
+    def init_embedder(self, embedder_type, frequencies=None, include_input=False):
         """Creates positional embedding functions for the position and view direction.
         """
-        if embedder_type == 'none':
+        if embedder_type == 'none' and not include_input:
             embedder, embed_dim = None, 0
-        elif embedder_type == 'identity':
-            embedder, embed_dim = torch.nn.Identity(), 0
+        elif embedder_type == 'identity' or (embedder_type == 'none' and include_input):
+            embedder, embed_dim = torch.nn.Identity(), 3
         elif embedder_type == 'positional':
             embedder, embed_dim = get_positional_embedder(frequencies=frequencies)
         elif embedder_type == 'spherical':
@@ -98,7 +96,7 @@ class DiffuseNeuralField(BaseNeuralField):
         """
 
         decoder_spatial = BasicDecoder(input_dim=self.spatial_net_input_dim,
-                                       output_dim=4 + bottleneck_dim,
+                                       output_dim=7+bottleneck_dim,
                                        activation=get_activation_class(activation_type),
                                        bias=True,
                                        layer=get_layer_class(layer_type),
@@ -112,7 +110,7 @@ class DiffuseNeuralField(BaseNeuralField):
                                            bias=True,
                                            layer=get_layer_class(layer_type),
                                            num_layers=num_layers,
-                                           hidden_dim=4,
+                                           hidden_dim=32,
                                            skip=[])
 
         decoder_background = BasicDecoder(input_dim=self.background_net_input_dim,
@@ -186,7 +184,7 @@ class DiffuseNeuralField(BaseNeuralField):
             feats = torch.cat([feats, embedded_pos], dim=-1)
 
         density_feats = self.decoder_spatial(feats)[..., 0:1]
-        density_feats += self.density_blob(coords, self.blob_scale, self.blob_width)
+        # density_feats += self.density_blob(coords, self.blob_scale, self.blob_width)
         density = self.density_activation(density_feats)
 
         return density
@@ -199,8 +197,8 @@ class DiffuseNeuralField(BaseNeuralField):
 
     def features(self, coords, ray_d, lod_idx=None, channels=[],
                  ambient_ratio=0.1, shading='lambertian', light=None,
-                 perturb_density=False, perturb_density_std=0.1,
-                 use_light=True, phase='coarse'):
+                 use_light=True, phase='coarse',
+                 **kwargs):
         if lod_idx is None:
             lod_idx = len(self.grid.active_lods) - 1
         batch, _ = coords.shape
@@ -217,11 +215,9 @@ class DiffuseNeuralField(BaseNeuralField):
         bottleneck = spatial_feats[..., 4:]
 
         density_feats += self.density_blob(coords, self.blob_scale, self.blob_width)
-        if False and perturb_density:
-            density_feats += torch.randn_like(density_feats) * perturb_density_std
         density = self.density_activation(density_feats)
         albedo_color = torch.sigmoid(albedo_color_feats)
-        normal = self.normal(coords, lod_idx=lod_idx, method="tetrahedron with grad")
+        normal = self.normal(coords, lod_idx=lod_idx, method=self.normal_method)
 
         albedo, lambertian, textureless = None, None, None
         if "albedo" in channels:
@@ -235,14 +231,19 @@ class DiffuseNeuralField(BaseNeuralField):
             ambient_ratio = 0.1
 
         if use_light:
-            if light is None:
-                light = 2 * torch.tensor([1., 1., -1.], device=self.device)
-            if shading == 'textureless':
-                albedo_color = torch.ones_like(albedo_color)
-            light_dir = l2_normalize(coords - light)
-            light_dir = l2_normalize(-light)
-            light_diffuse = (-normal * light_dir).sum(-1, keepdim=True).clamp(min=0)
-            colors = albedo_color * ((1 - ambient_ratio) * light_diffuse + ambient_ratio)
+            if shading == 'albedo':
+                colors = albedo_color
+            elif shading == 'normal':
+                colors = (normal + 1) / 2
+            else:
+                if light is None:
+                    light = 2 * torch.tensor([1., 1., -1.], device=self.device)
+                light_dir = l2_normalize(coords - light)
+                light_dir = l2_normalize(-light)
+                light_diffuse = (-normal * light_dir).sum(-1, keepdim=True).clamp(min=0)
+                if shading == 'textureless':
+                    albedo_color = torch.ones_like(albedo_color)
+                colors = albedo_color * ((1 - ambient_ratio) * light_diffuse + ambient_ratio)
         else:
             # ref_ray_d = reflect(ray_d, normal_pred)
             if self.view_embedder is not None:
@@ -263,13 +264,35 @@ class DiffuseNeuralField(BaseNeuralField):
 
         return results
 
-    def normal(self, coords, lod_idx=None, method="tetrahedron", eps=0.005):
+    def interpolate(self, coords, lod_idx):
+        import wisp.ops.grid as grid_ops
+        # Remember desired output shape
+        output_shape = coords.shape[:-1]
+        if coords.ndim == 3:    # flatten num_samples dim with batch for cuda call
+            batch, num_samples, coords_dim = coords.shape  # batch x num_samples
+            coords = coords.reshape(batch * num_samples, coords_dim)
+
+        feats = grid_ops.hashgrid(coords, self.grid.resolutions, self.grid.codebook_bitwidth, lod_idx, self.grid.codebook)
+
+        return feats.reshape(*output_shape, feats.shape[-1])
+
+    def normal(self, coords, lod_idx=None, method="finitediff", eps=0.005):
         def f(x):
             d = self.density(x, lod_idx=lod_idx)
             tau = 1.0 - torch.exp(-d * eps)
             return d
         if method == "autograd":
-            gradient = autodiff_gradient(coords, f)
+            with torch.cuda.amp.autocast():
+                with torch.enable_grad():
+                    x = coords.detach()
+                    x = torch.cat([x, 0.5*torch.ones([1, 3], device=self.device)], dim=0)
+                    x.requires_grad = True
+                    print("Prepare compute normal", x)
+                    y = self.interpolate(x, lod_idx)
+                    print("Compute normal", y)
+                    gradient = torch.autograd.grad(y, x, grad_outputs=torch.ones_like(y),
+                                                   create_graph=False)[0]
+                    print(torch.abs(gradient).sum())
         elif method == "finitediff":
             gradient = finitediff_gradient(coords, f, eps)
         elif method == "tetrahedron":

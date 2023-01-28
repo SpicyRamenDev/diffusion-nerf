@@ -28,10 +28,11 @@ from wisp.renderer.core.renderers import NeuralRadianceFieldPackedRenderer
 
 from src.trainer import SDSTrainer
 from src.ray_sampler import SampleNoisyRays
-from src.rf_tracer import DiffuseTracer
+from src.tracer import DiffuseTracer
 from src.nerf import DiffuseNeuralField
 from src.stable_diffusion import StableDiffusion
 from src.dataset import FullMultiviewDataset
+from src.renderer import DiffuseNeuralRenderer
 
 
 def parse_args():
@@ -232,6 +233,18 @@ def parse_args():
                                         help='Camera projection.')
     offline_renderer_group.add_argument('--camera-clamp', nargs=2, type=float, default=[0, 10],
                                         help='Camera clipping bounds.')
+    offline_renderer_group.add_argument('--render-num-angles', type=int, default=24,
+                                        help='Number of angles to render at.')
+    offline_renderer_group.add_argument('--render-num-steps', type=int, default=1024,
+                                        help='Number of steps to render at.')
+    offline_renderer_group.add_argument('--render-polar', type=int, default=60,
+                                        help='Polar angle to render at.')
+    offline_renderer_group.add_argument('--render-distance', type=float, default=2.5,
+                                        help='Distance to render at.')
+    offline_renderer_group.add_argument('--render-fov', type=float, default=30,
+                                        help='FOV to render at.')
+    offline_renderer_group.add_argument('--render-every', type=int, default=10,
+                                        help='Frequency of renders.')
 
     # Diffusion NeRF specific arguments
 
@@ -272,6 +285,11 @@ def parse_args():
                            help='Scale of the gaussian blob of density.')
     nef_group.add_argument('--blob-width', type=float, default=0.2,
                            help='Width of the gaussian blob of density.')
+    nef_group.add_argument('--normal-method', type=str,
+                           choices=["autograd", "finitediff", "tetrahedron",
+                                    "finitediff with grad", "tetrahedron with grad'"],
+                           default="finitediff",
+                           help='Method used to compute the surface normal.')
 
     diffusion_group = parser.add_argument_group('diffusion')
     diffusion_group.add_argument('--repo-id', type=str, default='stabilityai/stable-diffusion-2-1-base',
@@ -280,7 +298,7 @@ def parse_args():
                                  help='The prompt used for the diffusion model.')
     diffusion_group.add_argument('--negative-prompt', type=str, default='',
                                  help='The negative prompt used for the diffusion model.')
-    diffusion_group.add_argument('--aug-bg-color', type=str, choices=['noise', 'decoder', 'gaussian'], default='noise',
+    diffusion_group.add_argument('--aug-bg-color', type=str, choices=['noise', 'decoder', 'blur'], default='noise',
                                  help='Type of background augmentation.')
     diffusion_group.add_argument('--guidance-scale', type=int, default=100,
                                  help='The guidance scale used for the diffusion model.')
@@ -314,7 +332,7 @@ def parse_args():
 
     # Override some definitions for interactive app, such as validation logic and default data background color
     if is_interactive():
-        args.bg_color = 'black'
+        args.bg_color = 'white'
         args.save_every = -1
         args.render_tb_every = -1
         args.valid_every = -1
@@ -467,7 +485,8 @@ def load_neural_field(args, dataset: torch.utils.data.Dataset) -> BaseNeuralFiel
         prune_min_density=args.prune_min_density,       # Used only for grid types which support pruning
         blob_scale=args.blob_scale,
         blob_width=args.blob_width,
-        bottleneck_dim=args.bottleneck_dim
+        bottleneck_dim=args.bottleneck_dim,
+        normal_method=args.normal_method,
     )
     return nef
 
@@ -552,11 +571,11 @@ def load_app(args, scene_state, trainer):
         logging.info("Running headless. For the app, set $WISP_HEADLESS=0.")
         return None  # Interactive mode is disabled
     else:
-        from wisp.renderer.app.optimization_app import OptimizationApp
+        from src.app import App
         scene_state.renderer.device = trainer.device  # Use same device for trainer and app renderer
-        app = OptimizationApp(wisp_state=scene_state,
-                              trainer_step_func=trainer.iterate,
-                              experiment_name="wisp trainer")
+        app = App(wisp_state=scene_state,
+                  trainer_step_func=trainer.iterate,
+                  experiment_name="Diffusion NeRF")
         return app
 
 
@@ -567,7 +586,7 @@ def is_interactive() -> bool:
 
 register_neural_field_type(neural_field_type=DiffuseNeuralField,
                            tracer_type=DiffuseTracer,
-                           renderer_type=NeuralRadianceFieldPackedRenderer)
+                           renderer_type=DiffuseNeuralRenderer)
 
 args, args_dict = parse_args()  # Obtain args by priority: cli args > config yaml > argparse defaults
 default_log_setup(args.log_level)

@@ -35,18 +35,20 @@ nef:
     num_layers: 1
     pos_embedder: 'none'
     position_input: False
+    pos_multires: 10
     view_embedder: 'spherical'
     view_multires: 4
     blob_scale: 5.0
-    blob_width: 0.2
-    bottleneck_dim: 2
+    blob_width: 0.3
+    bottleneck_dim: 0
+    normal_method: 'autograd'
     
 tracer:
     raymarch_type: 'ray'
     num_steps: 512
 
 optimizer:
-    optimizer_type: 'rmsprop'  # 'adam'
+    optimizer_type: 'adam'
     lr: 0.001
     rgb_loss: 1.0
     minibatch_size: 1
@@ -59,19 +61,19 @@ optimizer:
     phase_ratios:
         - 0.1
         - 0.7
-    albedo_steps: 1000
-    orientation_loss: 0.01
+    albedo_steps: 100000
+    orientation_loss: 0.0 #1
     opacity_loss: 0.002
     entropy_loss: 0 #.001
     total_variation_loss: 0
-    diffusion_loss: 1
+    diffusion_loss: 1.0
     aug_bg_color: 'noise'
 
 trainer:
     epochs: 100
     batch_size: 1
     model_format: 'full'
-    valid_every: 50
+    valid_every: 10
     save_every: 10
     prune_every: 16
     render_tb_every: 10
@@ -85,7 +87,7 @@ diffusion:
 camera:
     resolutions:
         - 64
-        - 64
+        - 128
         - 256
     light_distance_range:
         - 2.0 # 0.8
@@ -101,19 +103,27 @@ camera:
         - 100
     focal_length_multiplier_range:
         - 1.0  # 0.7
-        - 2.0  # 1.35
+        - 3.0  # 1.35
     camera_offset: 0  # 0.1
     camera_up_std: 0  # 0.02
     look_at_std: 0  # 0.1
     
 renderer:
+    camera_lookat:
+        - 0.0
+        - 0.0
+        - 0.0
     render_batch: 4096
-    num_steps: 512
-    raymarch_type: ray
     camera_origin:
         - -3.0
         - 0.65
         - -3.0
     render_res:
-        - 1024
-        - 1024
+        - 512
+        - 512
+    render_num_angles: 48
+    render_num_steps: 512
+    render_polar: 60
+    render_distance: 1
+    render_fov: 30
+    render_every: 5

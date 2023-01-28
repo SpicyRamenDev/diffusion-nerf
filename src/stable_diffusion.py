@@ -75,7 +75,6 @@ class StableDiffusion(nn.Module):
     def step(self, text_embeddings, image, guidance_scale=100,
              min_ratio=0.02, max_ratio=0.98,
              weight_type='constant',
-             use_decoder=False,
              scaler=None):
         image = image.detach()
         image.requires_grad = True
@@ -109,8 +108,9 @@ class StableDiffusion(nn.Module):
         grad = w * (noise_pred - noise)
         grad = torch.nan_to_num(grad)
 
-        if scaler is not None:
-            scaler.scale(latent).backward(gradient=grad)
-        else:
-            latent.backward(gradient=grad)
-        return image.grad / (64 * 64)
+        # latent.backward(gradient=grad)
+        image_grad = torch.autograd.grad(latent, image,
+                                         grad_outputs=grad)[0]
+        image_grad = image_grad / (64 * 64)
+
+        return image_grad

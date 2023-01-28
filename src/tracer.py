@@ -45,8 +45,8 @@ class DiffuseTracer(PackedRFTracer):
 
         if bg_color == 'white':
             rgb = torch.ones(N, 3, device=rays.origins.device)
-        elif bg_color == 'noise':
-            rgb = bg_color_value * torch.ones(N, 3, device=rays.origins.device)
+        elif bg_color == 'noise' or bg_color == 'blur':
+            rgb = bg_color_value.reshape(-1, 3).clone()
         elif bg_color == 'decoder':
             rgb = nef.background(rays.origins, rays.dirs)["background"]
         else:
@@ -62,11 +62,11 @@ class DiffuseTracer(PackedRFTracer):
                                                  level=nef.grid.active_lods[lod_idx],
                                                  num_samples=num_steps,
                                                  raymarch_type=raymarch_type)
-            ridx = raymarch_results.ridx
-            samples = raymarch_results.samples
-            deltas = raymarch_results.deltas
-            boundary = raymarch_results.boundary
-            depths = raymarch_results.depth_samples
+        ridx = raymarch_results.ridx
+        samples = raymarch_results.samples
+        deltas = raymarch_results.deltas
+        boundary = raymarch_results.boundary
+        depths = raymarch_results.depth_samples
         if out_rays is not None:
             out_rays.append(raymarch_results)
 
@@ -76,7 +76,7 @@ class DiffuseTracer(PackedRFTracer):
 
         queried_channels = {"rgb", "density"}.union(extra_channels)
         if nef_parameters is None:
-            nef_parameters = {}
+            nef_parameters = self.nef_parameters
         queried_features = nef.features(coords=samples, ray_d=hit_ray_d, lod_idx=lod_idx, channels=queried_channels,
                                         **nef_parameters)
         color = queried_features["rgb"]
@@ -97,15 +97,11 @@ class DiffuseTracer(PackedRFTracer):
         out_alpha[ridx_hit] = alpha
         hit[ridx_hit] = alpha[..., 0] > 0.0
 
+        rgb = rgb.type(ray_colors.dtype)
         if bg_color == 'white':
             color = (1.0 - alpha) + ray_colors
-        elif bg_color == 'noise':
-            color = (1.0 - alpha) * bg_color_value + ray_colors
-        elif bg_color == 'decoder':
-            color = (1.0 - alpha) * rgb[ridx_hit] + ray_colors
         else:
-            color = ray_colors
-        rgb = rgb.type(color.dtype)
+            color = (1.0 - alpha) * rgb[ridx_hit] + ray_colors
         rgb[ridx_hit] = color
 
         extra_outputs = {}
@@ -125,13 +121,8 @@ class DiffuseTracer(PackedRFTracer):
             orientation_loss = spc_render.sum_reduce(orientation_loss_term * transmittance.detach(), boundary)
             extra_outputs["orientation_loss"] = orientation_loss
 
-        if total_variation_loss:
-            opacity = 1 - torch.exp(-tau)
-            shifted_opacity = torch.cat([torch.zeros(1, device=opacity.device), opacity[:-1]], dim=0)
-            shifted_opacity[boundary] = opacity[boundary]
-            total_variation = torch.abs(opacity - shifted_opacity) / deltas
-            total_variation_loss = spc_render.sum_reduce(total_variation, boundary)
-            extra_outputs["total_variation_loss"] = total_variation_loss
+        if total_variation_loss > 0:
+            raise NotImplementedError("Total variation loss is not implemented")
 
         if entropy_loss > 0:
             opacity = 1 - torch.exp(-tau)
@@ -142,7 +133,7 @@ class DiffuseTracer(PackedRFTracer):
             entropy_ray *= mask
             out_entropy = torch.zeros(N, 1, device=entropy_ray.device)
             out_entropy[ridx_hit] = entropy_ray
-            extra_outputs["entropy"] = out_entropy
+            extra_outputs["entropy_loss"] = out_entropy
 
         return RenderBuffer(depth=depth, hit=hit, rgb=rgb, alpha=out_alpha,
                             **extra_outputs)

@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
+from typing import Dict, Any
+from wisp.core import WispModule
 
 from .utils import get_sph_harm_mat, compute_integrated_dir_enc
 
 
-class IDEEmbedder(nn.Module):
+class IDEEmbedder(WispModule):
     """PyTorch implementation of spherical harmonics embedding.
     """
 
@@ -58,6 +60,17 @@ class IDEEmbedder(nn.Module):
             output = torch.cat([output, kappa_inv], axis=-1)
 
         return output
+
+    def public_properties(self) -> Dict[str, Any]:
+        """ Wisp modules expose their public properties in a dictionary.
+        The purpose of this method is to give an easy table of outwards facing attributes,
+        for the purpose of logging, gui apps, etc.
+        """
+        return {
+            "Output Dim": self.out_dim,
+            "Degree": self.degree,
+            "Include Input": self.include_input
+        }
 
 
 def get_ide_embedder(degree, use_kappa):
