@@ -21,6 +21,30 @@ from kaolin.render.camera import Camera
 from wisp.ops.raygen.raygen import generate_default_grid, generate_centered_pixel_coords, generate_pinhole_rays
 
 
+@torch.cuda.amp.autocast(enabled=False)
+def rays_aabb_bounds(rays, aabb=None):
+    if aabb is None:
+        aabb = torch.tensor([[-1, -1, -1], [1, 1, 1]], device=rays.origins.device)
+
+    tmin = (aabb[0] - rays.origins) / rays.dirs
+    tmax = (aabb[1] - rays.origins) / rays.dirs
+    tmin, tmax = torch.min(tmin, tmax), torch.max(tmin, tmax)
+    tmin, tmax = tmin.max(dim=-1, keepdim=True)[0], tmax.min(dim=-1, keepdim=True)[0]
+
+    mask = (tmax < tmin).reshape(-1)
+    tmin[mask] = rays.dist_max
+    tmax[mask] = rays.dist_max
+
+    if mask.any():
+        print(mask.sum().item())
+        print((rays.origins[~mask]+tmax[~mask]*rays.dirs[~mask]).abs().flatten().max(dim=-1)[0])
+
+    tmin = tmin.clamp(min=rays.dist_min, max=rays.dist_max)
+    tmax = tmax.clamp(min=rays.dist_min, max=rays.dist_max)
+
+    return tmin, tmax, ~mask
+
+
 def generate_camera_rays(camera):
     ray_grid = generate_centered_pixel_coords(camera.width, camera.height,
                                               camera.width, camera.height,

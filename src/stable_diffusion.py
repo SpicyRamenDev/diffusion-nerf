@@ -17,7 +17,7 @@ class StableDiffusion(nn.Module):
         self.device = device
 
         self.pipeline = StableDiffusionPipeline.from_pretrained(repo_id)  # , torch_dtype=torch.float16, revision="fp16")
-        self.pipeline.scheduler = DDIMScheduler.from_config(self.pipeline.scheduler.config)
+        # self.pipeline.scheduler = DDIMScheduler.from_config(self.pipeline.scheduler.config)
         self.pipeline.enable_attention_slicing()
         self.pipeline.to(device)
 
@@ -35,6 +35,8 @@ class StableDiffusion(nn.Module):
         self.num_train_timesteps = self.scheduler.config.num_train_timesteps
         self.alphas_cumprod = self.scheduler.alphas_cumprod
 
+        self.scaler = torch.cuda.amp.GradScaler()
+
     def get_text_embedding(self, prompt, negative_prompt=""):
         with torch.no_grad():
             text_embedding = self.pipeline._encode_prompt(prompt=prompt,
@@ -46,7 +48,7 @@ class StableDiffusion(nn.Module):
 
     def encode(self, image):
         posterior = self.vae.encode(image).latent_dist
-        latent = posterior.mean * 0.18215
+        latent = posterior.sample() * 0.18215
         return latent
 
     def add_noise(
@@ -74,10 +76,8 @@ class StableDiffusion(nn.Module):
 
     def step(self, text_embeddings, image, guidance_scale=100,
              min_ratio=0.02, max_ratio=0.98,
-             weight_type='constant',
-             scaler=None):
-        image = image.detach()
-        image.requires_grad = True
+             weight_type='constant'):
+        image = image.detach().requires_grad_(True)
 
         transformed_image = F.interpolate(image, (512, 512), mode='bilinear', align_corners=False)
         transformed_image = transformed_image * 2 - 1
@@ -99,9 +99,9 @@ class StableDiffusion(nn.Module):
         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
         if weight_type == 'linear':
-            w = (1 - self.alphas_cumprod[t])
+            w = torch.sqrt(1 - self.alphas_cumprod[t])
         elif weight_type == 'quadratic':
-            w = (1 - self.alphas_cumprod[t]) ** 2
+            w = 1 - self.alphas_cumprod[t]
         else:
             w = 1
 
@@ -111,6 +111,6 @@ class StableDiffusion(nn.Module):
         # latent.backward(gradient=grad)
         image_grad = torch.autograd.grad(latent, image,
                                          grad_outputs=grad)[0]
-        image_grad = image_grad / (64 * 64)
+        image_grad = image_grad
 
         return image_grad

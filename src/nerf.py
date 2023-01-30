@@ -161,6 +161,7 @@ class DiffuseNeuralField(BaseNeuralField):
     def register_forward_functions(self):
         self.extra_channels = ["lambertian", "textureless", "albedo"]
         self._register_forward_function(self.features, ["density", "rgb", "normal",
+                                                        "orientation_loss",
                                                         *self.extra_channels])
 
     def density_blob(self, coords, scale, width):
@@ -168,9 +169,9 @@ class DiffuseNeuralField(BaseNeuralField):
             return 0
 
         d2 = (coords ** 2).sum(axis=-1, keepdim=True)
-        density = scale * torch.exp(- d2 / (width ** 2))
-        # d = torch.sqrt(d2)
-        # density = scale * (1 - d / width)
+        # density = scale * torch.exp(- d2 / (width ** 2))
+        d = torch.sqrt(d2)
+        density = scale * (1 - d / width)
         return density
 
     def density(self, coords, lod_idx=None):
@@ -184,7 +185,7 @@ class DiffuseNeuralField(BaseNeuralField):
             feats = torch.cat([feats, embedded_pos], dim=-1)
 
         density_feats = self.decoder_spatial(feats)[..., 0:1]
-        # density_feats += self.density_blob(coords, self.blob_scale, self.blob_width)
+        density_feats += self.density_blob(coords, self.blob_scale, self.blob_width)
         density = self.density_activation(density_feats)
 
         return density
@@ -212,7 +213,7 @@ class DiffuseNeuralField(BaseNeuralField):
 
         density_feats = spatial_feats[..., 0:1]
         albedo_color_feats = spatial_feats[..., 1:4]
-        bottleneck = spatial_feats[..., 4:]
+        bottleneck = spatial_feats[..., -self.bottleneck_dim:]
 
         density_feats += self.density_blob(coords, self.blob_scale, self.blob_width)
         density = self.density_activation(density_feats)
@@ -258,23 +259,15 @@ class DiffuseNeuralField(BaseNeuralField):
 
         results = dict(rgb=colors, density=density, normal=normal)
 
+        if "orientation_loss" in channels:
+            orientation_loss = (normal * ray_d).sum(-1, keepdim=True).clamp(min=0) ** 2
+            results["orientation_loss"] = orientation_loss
+
         for channel in self.extra_channels:
             if channel in channels:
                 results[channel] = colors
 
         return results
-
-    def interpolate(self, coords, lod_idx):
-        import wisp.ops.grid as grid_ops
-        # Remember desired output shape
-        output_shape = coords.shape[:-1]
-        if coords.ndim == 3:    # flatten num_samples dim with batch for cuda call
-            batch, num_samples, coords_dim = coords.shape  # batch x num_samples
-            coords = coords.reshape(batch * num_samples, coords_dim)
-
-        feats = grid_ops.hashgrid(coords, self.grid.resolutions, self.grid.codebook_bitwidth, lod_idx, self.grid.codebook)
-
-        return feats.reshape(*output_shape, feats.shape[-1])
 
     def normal(self, coords, lod_idx=None, method="finitediff", eps=0.005):
         def f(x):
@@ -282,17 +275,12 @@ class DiffuseNeuralField(BaseNeuralField):
             tau = 1.0 - torch.exp(-d * eps)
             return d
         if method == "autograd":
-            with torch.cuda.amp.autocast():
-                with torch.enable_grad():
-                    x = coords.detach()
-                    x = torch.cat([x, 0.5*torch.ones([1, 3], device=self.device)], dim=0)
-                    x.requires_grad = True
-                    print("Prepare compute normal", x)
-                    y = self.interpolate(x, lod_idx)
-                    print("Compute normal", y)
-                    gradient = torch.autograd.grad(y, x, grad_outputs=torch.ones_like(y),
-                                                   create_graph=False)[0]
-                    print(torch.abs(gradient).sum())
+            is_grad_enabled = torch.is_grad_enabled()
+            with torch.enable_grad():
+                x = coords.detach().requires_grad_(True)
+                y = f(x)
+                gradient = torch.autograd.grad(y, x, grad_outputs=torch.ones_like(y),
+                                               create_graph=is_grad_enabled)[0]
         elif method == "finitediff":
             gradient = finitediff_gradient(coords, f, eps)
         elif method == "tetrahedron":
@@ -339,7 +327,9 @@ class DiffuseNeuralField(BaseNeuralField):
             "Grid": self.grid,
             "Pos. Embedding": self.pos_embedder,
             "View Embedding": self.view_embedder,
-            "Decoder": self.decoder_spatial,
+            "Decoder Spatial": self.decoder_spatial,
+            "Decoder Directional": self.decoder_directional,
+            "Decoder Background": self.decoder_background,
         }
         if self.prune_density_decay is not None:
             properties['Pruning Density Decay'] = self.prune_density_decay

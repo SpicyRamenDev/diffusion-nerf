@@ -1,8 +1,20 @@
 apt-get update
 apt-get upgrade -y
+apt-get install -y libx11-6
+apt-get install -y python-opengl
+apt-get install -y python3-opengl
+apt-get install -y libglfw3-dev
+apt-get install -y libgles2-mesa-dev
+apt-get install -y libfreetype-dev
+apt-get install -y libglib2.0-0
+apt-get install -y software-properties-common
+add-apt-repository -y ppa:kisak/kisak-mesa
+apt-get update
+apt-get upgrade -y
 pip install ipywidgets --no-deps
 pip install diffusers transformers accelerate
 pip install opencv-python==4.5.5.64
+pip install pillow --upgrade
 apt-get install -y python3-opengl
 apt-get install -y libglfw3-dev libgles2-mesa-dev
 pip install pyrender

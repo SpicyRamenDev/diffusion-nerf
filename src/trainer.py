@@ -195,8 +195,7 @@ class SDSTrainer(BaseTrainer):
 
         loss = 0
 
-        # with torch.cuda.amp.autocast():
-        if True:
+        with torch.cuda.amp.autocast():
             nef_parameters = dict(phase=phase,
                                   use_light=False)
             rb = self.pipeline(rays=rays,
@@ -213,8 +212,8 @@ class SDSTrainer(BaseTrainer):
 
             loss += rgb_loss
 
-            # self.scaler.scale(loss).backward()
-            loss.backward()
+        self.scaler.scale(loss).backward()
+        # loss.backward()
 
         return loss.item()
 
@@ -228,6 +227,8 @@ class SDSTrainer(BaseTrainer):
         camera_distance = sample(self.extra_args["camera_distance_range"])
         camera_coords = camera_dir * camera_distance + camera_offset
         focal_length_multiplier = sample(self.extra_args["focal_length_multiplier_range"])
+        # if self.total_iterations < 1000:
+        #     focal_length_multiplier = 1.0
         focal_length = 0.5 * resolution * camera_distance * focal_length_multiplier
         camera_up = l2_normalize(torch.tensor([0., 1., 0.]) + torch.randn(3) * self.extra_args["camera_up_std"])
         look_at = torch.randn(3) * self.extra_args["look_at_std"]
@@ -239,7 +240,7 @@ class SDSTrainer(BaseTrainer):
             up=camera_up,
             focal_x=focal_length,
             width=resolution, height=resolution,
-            near=max(camera_distance-1.74, 0.0),
+            near=max(0, camera_distance-1.74),
             far=camera_distance+1.74,
             dtype=torch.float32,
             device='cuda'
@@ -282,12 +283,12 @@ class SDSTrainer(BaseTrainer):
         return dict(shading=shading, ambient_ratio=ambient_ratio)
 
     def get_diffusion_parameters(self, phase=0):
-        if phase == 0:
-            weight_type = 'constant'
-            min_ratio = 0.40
+        if phase == 0 or True:
+            weight_type = 'quadratic'
+            min_ratio = 0.02
             max_ratio = 0.98
         elif phase == 1:
-            weight_type = 'linear'
+            weight_type = 'quadratic'
             min_ratio = 0.02
             max_ratio = 0.98
         else:
@@ -350,7 +351,7 @@ class SDSTrainer(BaseTrainer):
                                        bg_color_value=bg_color_value,
                                        nef_parameters=nef_parameters)
         train_trace_parameters = dict(lod_idx=lod_idx,
-                                      channels=["rgb"],
+                                      channels=["rgb", "orientation_loss"],
                                       bg_color=bg_color,
                                       bg_color_value=bg_color_value,
                                       nef_parameters=nef_parameters,
@@ -368,98 +369,99 @@ class SDSTrainer(BaseTrainer):
             reg_factor = self.extra_args["reg_init_lr"] + (1 - self.extra_args["reg_init_lr"]) * self.total_iterations / self.extra_args["reg_warmup_iterations"]
 
         if 0 < self.extra_args["render_batch"] < rays.shape[0]:
-            image_batches = []
+            rb = RenderBuffer()
             rays_cache = []
-            for i, ray_pack in enumerate(rays.split(self.extra_args["render_batch"])):
-                start, end = i * self.extra_args["render_batch"], (i + 1) * self.extra_args["render_batch"]
-                pack_bg_color_value = bg_color_value.reshape(-1, 3)[start:end, ...]
-                render_trace_parameters["bg_color_value"] = pack_bg_color_value
-                # with torch.cuda.amp.autocast():
-                if True:
-                    with torch.no_grad():
-                        rb = self.pipeline(rays=ray_pack, out_rays=rays_cache, **render_trace_parameters)
-                        image_batches.append(rb.rgb[..., :3])
-                        del rb
+            with torch.cuda.amp.autocast():
+                with torch.no_grad():
+                    for i, ray_pack in enumerate(rays.split(self.extra_args["render_batch"])):
+                        start, end = i * self.extra_args["render_batch"], (i + 1) * self.extra_args["render_batch"]
+                        pack_bg_color_value = bg_color_value.reshape(-1, 3)[start:end, ...]
+                        render_trace_parameters["bg_color_value"] = pack_bg_color_value
+                        rb += self.pipeline(rays=ray_pack, out_rays=rays_cache, **render_trace_parameters)
 
-            image = torch.cat(image_batches, dim=0)
+            image = rb.rgb[..., :3]
             image = image.reshape(1, camera.width, camera.height, 3)
             image = image.permute(0, 3, 1, 2).contiguous()
 
-            diffusion_grad = self.diffusion.step(image=image, scaler=self.scaler, **diffusion_parameters)
+            image_f = image.float()
+            diffusion_grad = self.diffusion.step(image=image_f, **diffusion_parameters)
             diffusion_grad = diffusion_grad.reshape(3, -1).contiguous()
+            diffusion_grad = diffusion_grad / 4096.0
 
             for i, (ray_pack, ray_cache) in enumerate(zip(rays.split(self.extra_args["render_batch"]), rays_cache)):
                 start, end = i * self.extra_args["render_batch"], (i + 1) * self.extra_args["render_batch"]
                 pack_bg_color_value = bg_color_value.reshape(-1, 3)[start:end]
                 train_trace_parameters["bg_color_value"] = pack_bg_color_value
-                # with torch.cuda.amp.autocast():
-                if True:
+                with torch.cuda.amp.autocast():
                     rb = self.pipeline(rays=ray_pack, raymarch_results=ray_cache, **train_trace_parameters)
 
-                pack_image = rb.rgb[..., :3]
-                pack_image = pack_image.reshape(self.extra_args["render_batch"], 3)
-                pack_image = pack_image.permute(1, 0).contiguous()
-                pack_diffusion_grad = diffusion_grad[..., start:end]
-                pack_diffusion_loss = (pack_diffusion_grad * pack_image).sum()
-                pack_diffusion_loss = self.extra_args["diffusion_loss"] * pack_diffusion_loss
+                    pack_image = rb.rgb[..., :3]
+                    pack_image = pack_image.reshape(self.extra_args["render_batch"], 3)
+                    pack_image = pack_image.permute(1, 0).contiguous()
+                    pack_diffusion_grad = diffusion_grad[..., start:end]
+                    pack_diffusion_loss = (pack_diffusion_grad * pack_image).sum()
+                    pack_diffusion_loss = self.extra_args["diffusion_loss"] * pack_diffusion_loss
 
-                pack_reg_loss = 0
-                if self.extra_args["orientation_loss"] > 0:
-                    orientation_loss = rb.orientation_loss.sum()
-                    pack_reg_loss += reg_factor * self.extra_args["orientation_loss"] * orientation_loss
-                if self.extra_args["opacity_loss"] > 0:
-                    opacity_loss = torch.sqrt(rb.alpha ** 2 + 0.01).sum()
-                    # alphas = rb.alpha.clamp(1e-5, 1 - 1e-5)
-                    # opacity_loss = (-alphas * torch.log2(alphas) - (1 - alphas) * torch.log2(1 - alphas)).sum()
-                    pack_reg_loss += self.extra_args["opacity_loss"] * opacity_loss
-                if self.extra_args["entropy_loss"] > 0:
-                    entropy_loss = rb.entropy_loss.sum()
-                    pack_reg_loss += self.extra_args["entropy_loss"] * entropy_loss
-                pack_reg_loss *= 1.0 / rays.shape[0]
-                pack_reg_loss *= 1.0 / self.extra_args["minibatch_size"]
+                    pack_reg_loss = 0
+                    if self.extra_args["orientation_loss"] > 0:
+                        orientation_loss = rb.orientation_loss.sum()
+                        pack_reg_loss += reg_factor * self.extra_args["orientation_loss"] * orientation_loss
+                    if self.extra_args["opacity_loss"] > 0:
+                        opacity_loss = torch.sqrt(rb.alpha ** 2 + 0.01).sum()
+                        # alphas = rb.alpha.clamp(1e-5, 1 - 1e-5)
+                        # opacity_loss = (-alphas * torch.log2(alphas) - (1 - alphas) * torch.log2(1 - alphas)).sum()
+                        pack_reg_loss += self.extra_args["opacity_loss"] * opacity_loss
+                    if self.extra_args["entropy_loss"] > 0:
+                        entropy_loss = rb.entropy_loss.sum()
+                        pack_reg_loss += self.extra_args["entropy_loss"] * entropy_loss
+                    pack_reg_loss *= 1.0 / rays.shape[0]
+                    pack_reg_loss *= 1.0 / self.extra_args["minibatch_size"]
 
-                pack_loss = pack_diffusion_loss + pack_reg_loss
-                pack_loss *= 1.0 / self.extra_args["rgb_loss"]
-                # self.scaler.scale(pack_loss).backward()
-                pack_loss.backward()
+                    pack_loss = pack_diffusion_loss + pack_reg_loss
+                    pack_loss *= 1.0 / self.extra_args["rgb_loss"]
+
+                self.scaler.scale(pack_loss).backward()
+                # pack_loss.backward()
                 total_loss_value += pack_loss.item()
 
                 del rb
         else:
-            # with torch.cuda.amp.autocast():
-            if True:
+            with torch.cuda.amp.autocast():
                 rb = self.pipeline(rays=rays, **train_trace_parameters)
 
             image = rb.rgb[..., :3]
             image = image.reshape(1, camera.width, camera.height, 3)
             image = image.permute(0, 3, 1, 2).contiguous()
 
-            diffusion_grad = self.diffusion.step(image=image, scaler=self.scaler, **diffusion_parameters)
+            image_f = image.float()
+            diffusion_grad = self.diffusion.step(image=image_f, **diffusion_parameters)
+            diffusion_grad = diffusion_grad / 4096.0
 
-            diffusion_loss = (diffusion_grad * image).sum(1)
-            diffusion_loss = diffusion_loss.sum()
-            diffusion_loss = self.extra_args["diffusion_loss"] * diffusion_loss
-            diffusion_loss *= 1.0 / self.extra_args["minibatch_size"]
+            with torch.cuda.amp.autocast():
+                diffusion_loss = (diffusion_grad * image).sum()
+                diffusion_loss = self.extra_args["diffusion_loss"] * diffusion_loss
+                diffusion_loss *= 1.0 / self.extra_args["minibatch_size"]
 
-            reg_loss = 0
-            if self.extra_args["orientation_loss"] > 0:
-                orientation_loss = rb.orientation_loss.sum()
-                reg_loss += reg_factor * self.extra_args["orientation_loss"] * orientation_loss
-            if self.extra_args["opacity_loss"] > 0:
-                opacity_loss = torch.sqrt(rb.alpha ** 2 + 0.01).sum()
-                # alphas = rb.alpha.clamp(1e-5, 1 - 1e-5)
-                # opacity_loss = (-alphas * torch.log2(alphas) - (1 - alphas) * torch.log2(1 - alphas)).sum()
-                reg_loss += self.extra_args["opacity_loss"] * opacity_loss
-            if self.extra_args["entropy_loss"] > 0:
-                entropy_loss = rb.entropy_loss.sum()
-                reg_loss += self.extra_args["entropy_loss"] * entropy_loss
-            reg_loss *= 1.0 / rays.shape[0]
-            reg_loss *= 1.0 / self.extra_args["minibatch_size"]
+                reg_loss = 0
+                if self.extra_args["orientation_loss"] > 0:
+                    orientation_loss = rb.orientation_loss.sum()
+                    reg_loss += reg_factor * self.extra_args["orientation_loss"] * orientation_loss
+                if self.extra_args["opacity_loss"] > 0:
+                    opacity_loss = torch.sqrt(rb.alpha ** 2 + 0.01).sum()
+                    # alphas = rb.alpha.clamp(1e-5, 1 - 1e-5)
+                    # opacity_loss = (-alphas * torch.log2(alphas) - (1 - alphas) * torch.log2(1 - alphas)).sum()
+                    reg_loss += self.extra_args["opacity_loss"] * opacity_loss
+                if self.extra_args["entropy_loss"] > 0:
+                    entropy_loss = rb.entropy_loss.sum()
+                    reg_loss += self.extra_args["entropy_loss"] * entropy_loss
+                reg_loss *= 1.0 / rays.shape[0]
+                reg_loss *= 1.0 / self.extra_args["minibatch_size"]
 
-            loss = diffusion_loss + reg_loss
-            loss *= 1.0 / self.extra_args["rgb_loss"]
-            # self.scaler.scale(loss).backward()
-            loss.backward()
+                loss = diffusion_loss + reg_loss
+                loss *= 1.0 / self.extra_args["rgb_loss"]
+
+            self.scaler.scale(loss).backward()
+            # loss.backward()
             total_loss_value += loss.item()
 
         print("Iteration:", self.total_iterations,
@@ -493,9 +495,9 @@ class SDSTrainer(BaseTrainer):
                 loss += self.step_gt(data, phase=phase)
 
         self.log_dict['total_loss'] += loss
-        # self.scaler.step(self.optimizer)
-        self.optimizer.step()
-        # self.scaler.update()
+        self.scaler.step(self.optimizer)
+        # self.optimizer.step()
+        self.scaler.update()
 
         if self.scheduler is not None:
             self.scheduler.step(self.total_iterations / self.iterations_per_epoch)
@@ -565,7 +567,7 @@ class SDSTrainer(BaseTrainer):
             up=torch.tensor([0.0, 1.0, 0.0]),
             fov=fov,
             width=width, height=height,
-            near=max(distance-1.74, 0.0),
+            near=max(0, distance-1.74),
             far=distance+1.74,
             dtype=torch.float32,
             device='cuda'

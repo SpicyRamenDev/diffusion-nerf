@@ -11,18 +11,97 @@ import torch.nn as nn
 import kaolin.render.spc as spc_render
 from wisp.core import RenderBuffer
 from wisp.tracers import BaseTracer, PackedRFTracer
+from .utils import rays_aabb_bounds
+
+from wisp.accelstructs.base_as import BaseAS, ASQueryResults, ASRaytraceResults, ASRaymarchResults
 
 
 class DiffuseTracer(PackedRFTracer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def uniform_sample(self, nef, rays, num_samples, **kwargs):
-        raymarch_results = nef.grid.raymarch(rays,
-                                             level=nef.grid.active_lods[lod_idx],
-                                             num_samples=num_steps,
-                                             raymarch_type=raymarch_type)
-        return raymarch_results
+    def stratified_sampling(self, nef, rays, num_samples=64) -> ASRaymarchResults:
+        level = nef.grid.blas_level
+
+        depth = torch.linspace(0, 1.0, num_samples, device=rays.origins.device)[None] + \
+                (torch.rand(rays.origins.shape[0], num_samples, device=rays.origins.device) / num_samples)
+
+        tmin, tmax, imask = rays_aabb_bounds(rays)
+        tmin = tmin[imask]
+        tmax = tmax[imask]
+        depth = depth[imask]
+        origins = rays.origins[imask]
+        dirs = rays.dirs[imask]
+
+        depth *= (tmax - tmin)
+        depth += tmin
+
+        num_rays = origins.shape[0]
+        samples = torch.addcmul(origins[:, None], dirs[:, None], depth[:, :, None])
+        deltas = depth.diff(dim=-1,
+                            prepend=(torch.zeros(origins.shape[0], 1, device=depth.device) + tmin))
+        query_results = nef.grid.query(samples.reshape(num_rays * num_samples, 3), level=level)
+        pidx = query_results.pidx
+        pidx = pidx.reshape(num_rays, num_samples)
+        mask = pidx > -1
+
+        depth_samples = depth[mask][:, None]
+        num_hit_samples = depth_samples.shape[0]
+        deltas = deltas[mask].reshape(num_hit_samples, 1)
+        samples = samples[mask]
+        ridx = torch.arange(0, rays.origins.shape[0], device=rays.origins.device)
+        ridx = ridx[..., None].repeat(1, num_samples)[imask][mask]
+        boundary = spc_render.mark_pack_boundaries(ridx)
+
+        return ASRaymarchResults(
+            ridx=ridx,
+            samples=samples,
+            depth_samples=depth_samples,
+            deltas=deltas,
+            boundary=boundary
+        )
+
+    @torch.no_grad()
+    def importance_sampling(self, nef, rays, num_coarse_samples=64, num_fine_samples=0) -> ASRaymarchResults:
+        level = nef.grid.blas_level
+        lod_idx = nef.grid.num_lods - 1
+
+        raymarch_results = self.stratified_sampling(nef, rays, num_coarse_samples)
+
+        ridx = raymarch_results.ridx
+        samples = raymarch_results.samples
+        deltas = raymarch_results.deltas
+        boundary = raymarch_results.boundary
+        depth_samples = raymarch_results.depth_samples
+
+        ridx_hit = ridx[spc_render.mark_pack_boundaries(ridx.int())]
+        hit_ray_d = rays.dirs.index_select(0, ridx)
+
+        density = nef.density(coords=samples, lod_idx=lod_idx)
+        density = density.reshape(-1, 1)
+        del ridx
+
+        tau = density * deltas
+        del density
+        _, transmittance = spc_render.exponential_integration(torch.ones_like(tau), tau, boundary, exclusive=True)
+        alpha = spc_render.sum_reduce(transmittance, boundary)
+
+        hit = alpha > 0
+        hit = hit.reshape(-1, 1)
+
+        bins = torch.multinomial(transmittance[hit], num_fine_samples, replacement=True)
+        print(bins.shape)
+        noise = torch.rand_like(bins)
+        new_depths = depth_samples[hit][bins] + noise * deltas[hit][bins]
+        new_samples = torch.addcmul(rays.origins[ridx_hit][None], hit_ray_d[None], new_depths[..., None])
+
+        return ASRaymarchResults(
+            ridx=ridx,
+            samples=samples,
+            depth_samples=depth_samples,
+            deltas=deltas,
+            boundary=boundary
+        )
 
     def trace(self, nef, rays, channels, extra_channels,
               lod_idx=None, raymarch_type='voxel', num_steps=64, step_size=1.0, bg_color='white',
@@ -58,9 +137,9 @@ class DiffuseTracer(PackedRFTracer):
             lod_idx = nef.grid.num_lods - 1
 
         if raymarch_results is None:
-            raymarch_results = nef.grid.raymarch(rays,
-                                                 level=nef.grid.active_lods[lod_idx],
-                                                 num_samples=num_steps,
+            # raymarch_results = self.stratified_sampling(nef, rays,
+            #                                             num_samples=num_steps)
+            raymarch_results = nef.grid.raymarch(rays, num_samples=num_steps,
                                                  raymarch_type=raymarch_type)
         ridx = raymarch_results.ridx
         samples = raymarch_results.samples
@@ -92,8 +171,8 @@ class DiffuseTracer(PackedRFTracer):
             ray_depth = spc_render.sum_reduce(depths.reshape(-1, 1) * transmittance, boundary)
             depth[ridx_hit, :] = ray_depth
 
-        # alpha = spc_render.sum_reduce(transmittance, boundary)
-        alpha = 1.0 - torch.exp(spc_render.sum_reduce(-tau, boundary))
+        alpha = spc_render.sum_reduce(transmittance, boundary)
+        # alpha = 1.0 - torch.exp(spc_render.sum_reduce(-tau, boundary))
         out_alpha[ridx_hit] = alpha
         hit[ridx_hit] = alpha[..., 0] > 0.0
 
@@ -108,12 +187,15 @@ class DiffuseTracer(PackedRFTracer):
         for channel in extra_channels:
             feats = queried_features[channel]
             num_channels = feats.shape[-1]
-            ray_feats = spc_render.sum_reduce(feats.reshape(-1, num_channels).contiguous() * transmittance, boundary)
+            if "reg" in channel:
+                ray_feats = spc_render.sum_reduce(feats.reshape(-1, num_channels).contiguous() * transmittance.detach(), boundary)
+            else:
+                ray_feats = spc_render.sum_reduce(feats.reshape(-1, num_channels).contiguous() * transmittance, boundary)
             out_feats = torch.zeros(N, num_channels, device=feats.device)
             out_feats[ridx_hit] = ray_feats
             extra_outputs[channel] = out_feats
 
-        if orientation_loss > 0:
+        if False and orientation_loss > 0:
             samples_minus_delta = samples - hit_ray_d * deltas
             shifted_density = nef.density(coords=samples_minus_delta, lod_idx=lod_idx)
             density_gradient = (density - shifted_density) / deltas

@@ -19,7 +19,7 @@ grid:
     grid_type: 'HashGrid'
     interpolation_type: 'linear'
     multiscale_type: 'cat'
-    feature_dim: 2
+    feature_dim: 4
     feature_std: 0.01
     feature_bias: 0.0
     num_lods: 16
@@ -39,9 +39,9 @@ nef:
     view_embedder: 'spherical'
     view_multires: 4
     blob_scale: 5.0
-    blob_width: 0.3
-    bottleneck_dim: 0
-    normal_method: 'autograd'
+    blob_width: 0.4
+    bottleneck_dim: 2
+    normal_method: 'finitediff with grad'
     
 tracer:
     raymarch_type: 'ray'
@@ -55,14 +55,14 @@ optimizer:
     iterations_per_epoch: 100
     warmup_iterations: 0
     init_lr: 0.1
-    end_lr: 0.01
+    end_lr: 0.1
     reg_warmup_iterations: 1000
     reg_init_lr: 0.01
     phase_ratios:
         - 0.1
         - 0.7
-    albedo_steps: 100000
-    orientation_loss: 0.0 #1
+    albedo_steps: 10000
+    orientation_loss: 0.01
     opacity_loss: 0.002
     entropy_loss: 0 #.001
     total_variation_loss: 0
@@ -75,7 +75,7 @@ trainer:
     model_format: 'full'
     valid_every: 10
     save_every: 10
-    prune_every: 16
+    prune_every: 10
     render_tb_every: 10
 
 diffusion:
@@ -87,8 +87,8 @@ diffusion:
 camera:
     resolutions:
         - 64
-        - 128
-        - 256
+        - 64
+        - 64
     light_distance_range:
         - 2.0 # 0.8
         - 3.0 # 1.5
@@ -103,10 +103,10 @@ camera:
         - 100
     focal_length_multiplier_range:
         - 1.0  # 0.7
-        - 3.0  # 1.35
+        - 2.0  # 1.35
     camera_offset: 0  # 0.1
     camera_up_std: 0  # 0.02
-    look_at_std: 0  # 0.1
+    look_at_std: 0.1  # 0.1
     
 renderer:
     camera_lookat:
