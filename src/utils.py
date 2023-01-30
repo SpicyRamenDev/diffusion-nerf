@@ -35,10 +35,6 @@ def rays_aabb_bounds(rays, aabb=None):
     tmin[mask] = rays.dist_max
     tmax[mask] = rays.dist_max
 
-    if mask.any():
-        print(mask.sum().item())
-        print((rays.origins[~mask]+tmax[~mask]*rays.dirs[~mask]).abs().flatten().max(dim=-1)[0])
-
     tmin = tmin.clamp(min=rays.dist_min, max=rays.dist_max)
     tmax = tmax.clamp(min=rays.dist_min, max=rays.dist_max)
 

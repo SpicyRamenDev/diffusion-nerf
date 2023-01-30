@@ -124,6 +124,6 @@ renderer:
     render_num_angles: 48
     render_num_steps: 512
     render_polar: 60
-    render_distance: 1
+    render_distance: 2.0
     render_fov: 30
     render_every: 5

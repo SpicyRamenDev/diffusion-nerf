@@ -565,7 +565,7 @@ class SDSTrainer(BaseTrainer):
             eye=coords,
             at=self.extra_args["camera_lookat"],
             up=torch.tensor([0.0, 1.0, 0.0]),
-            fov=fov,
+            fov=fov * torch.pi / 180.0,
             width=width, height=height,
             near=max(0, distance-1.74),
             far=distance+1.74,
@@ -593,10 +593,10 @@ class SDSTrainer(BaseTrainer):
                                  height=height,
                                  channels=channels)
         for channel, images in outs.items():
-            path = os.path.join(self.log_dir, f"{prefix}{self.epoch}_{channel}.webp")
+            path = os.path.join(self.log_dir, f"{prefix}{self.epoch}_{channel}.gif")
             images[0].save(path,
                            append_images=images[1:],
-                           save_all=True, lossless=True, loop=0)
+                           save_all=True, loop=0, optimize=False)
 
     def validate(self):
         pass

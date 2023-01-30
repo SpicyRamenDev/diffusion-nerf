@@ -137,10 +137,10 @@ class DiffuseTracer(PackedRFTracer):
             lod_idx = nef.grid.num_lods - 1
 
         if raymarch_results is None:
-            # raymarch_results = self.stratified_sampling(nef, rays,
-            #                                             num_samples=num_steps)
-            raymarch_results = nef.grid.raymarch(rays, num_samples=num_steps,
-                                                 raymarch_type=raymarch_type)
+            raymarch_results = self.stratified_sampling(nef, rays,
+                                                        num_samples=num_steps)
+            # raymarch_results = nef.grid.raymarch(rays, num_samples=num_steps,
+            #                                      raymarch_type=raymarch_type)
         ridx = raymarch_results.ridx
         samples = raymarch_results.samples
         deltas = raymarch_results.deltas
