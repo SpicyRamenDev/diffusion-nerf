@@ -6,7 +6,7 @@ An implementation using [NVIDIA Kaolin Wisp](https://github.com/NVIDIAGameWorks/
 
 ### Few-shot 3D object reconstruction
 
-Input RGB views (missing the right side of the car):
+Input RGB views (only 3 sparse views, omitting the right side of the car):
 | 1 | 2 | 3 |
 | - | - | - |
 | ![car_rgba_00002](https://user-images.githubusercontent.com/21123989/215728220-427cee0e-3623-4877-9d2f-1bfd85c837c7.png) | ![car_rgba_00000](https://user-images.githubusercontent.com/21123989/215728247-ecc4c504-8f4b-450c-9d27-25fee0d9e34a.png) | ![car_rgba_00001](https://user-images.githubusercontent.com/21123989/215728277-3bd19476-abaf-4711-977e-0bc020c054fb.png) |
